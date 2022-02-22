@@ -1,0 +1,265 @@
+//------------------------------------------------
+//--- 010 Editor v2.0 Binary Template
+//
+//      File: ZIP.bt
+//    Author: SweetScape Software
+//   Version: 2.4
+//   Purpose: Parse ZIP archive files.
+//  Category: Archive
+// File Mask: *.zip
+//  ID Bytes: 50 4B //PK
+//   History:
+//   2.4   2022-02-21  ViRb3: Heuristically pattern match all headers,
+//                     Handle invalid header lengths.
+//   2.3   2015-07-18  SweetScape: Updated header for repository submission.
+//   2.2   S.Gibson:   Fix for entry comment field,
+//                     Fix for parsing data descriptors
+//   2.1   SweetScape: Added write function for ZIPFILERECORD structure
+//   2.0   SweetScape: Added read functions
+//   1.0   SweetScape: Initial release
+//
+// More information available at:
+//  https://en.wikipedia.org/wiki/Zip_%28file_format%29
+//------------------------------------------------
+
+// Define structures used in ZIP files
+
+// enum used for compression format
+typedef enum<short>
+{
+    COMP_STORED = 0,
+    COMP_SHRUNK = 1,
+    COMP_REDUCED1 = 2,
+    COMP_REDUCED2 = 3,
+    COMP_REDUCED3 = 4,
+    COMP_REDUCED4 = 5,
+    COMP_IMPLODED = 6,
+    COMP_TOKEN = 7,
+    COMP_DEFLATE = 8,
+    COMP_DEFLATE64 = 9
+} COMPTYPE;
+
+int checkValidUS(ushort &field) {
+    if (field <= FileSize() - FTell())
+        return 1;
+    else {
+        Printf( "Bad size detected at %u\n", startof(field) );
+        return 0;
+    }
+}
+
+int checkValidUI(uint &field) {
+    if (field <= FileSize() - FTell())
+        return 1;
+    else {
+        Printf( "Bad size detected at %u\n", startof(field) );
+        return 0;
+    }
+}
+
+// Defines a file record
+typedef struct
+{
+    // Header for the file
+    char frSignature[4]; // 0x04034b50
+    ushort frVersion;
+    ushort frFlags;
+    COMPTYPE frCompression;
+    DOSTIME frFileTime;
+    DOSDATE frFileDate;
+    uint frCrc<format = hex>;
+    uint frCompressedSize;
+    uint frUncompressedSize;
+    ushort frFileNameLength;
+    ushort frExtraFieldLength;
+    if (frFileNameLength > 0 && checkValidUS(this.frFileNameLength))
+        uchar frFileName[frFileNameLength];
+    if (frExtraFieldLength > 0 && checkValidUS(this.frExtraFieldLength))
+        uchar frExtraField[frExtraFieldLength];
+    // Compressed data
+    SetBackColor(cNone);
+    if (frCompressedSize > 0 && checkValidUI(this.frCompressedSize))
+        uchar frData[frCompressedSize];
+} ZIPFILERECORD<read = ReadZIPFILERECORD, write = WriteZIPFILERECORD>;
+
+// Defines an entry in the directory table
+typedef struct
+{
+    char deSignature[4]; // 0x02014b50
+    ushort deVersionMadeBy;
+    ushort deVersionToExtract;
+    ushort deFlags;
+    COMPTYPE deCompression;
+    DOSTIME deFileTime;
+    DOSDATE deFileDate;
+    uint deCrc<format = hex>;
+    uint deCompressedSize;
+    uint deUncompressedSize;
+    ushort deFileNameLength;
+    ushort deExtraFieldLength;
+    ushort deFileCommentLength;
+    ushort deDiskNumberStart;
+    ushort deInternalAttributes;
+    uint deExternalAttributes;
+    uint deHeaderOffset;
+    if (deFileNameLength > 0 && checkValidUS(this.deFileNameLength))
+        char deFileName[deFileNameLength];
+    if (deExtraFieldLength > 0 && checkValidUS(this.deExtraFieldLength))
+        uchar deExtraField[deExtraFieldLength];
+    if (deFileCommentLength > 0 && checkValidUS(this.deFileCommentLength))
+        uchar deFileComment[deFileCommentLength];
+} ZIPDIRENTRY<read = ReadZIPDIRENTRY>;
+
+// Defines the digital signature
+typedef struct
+{
+    char dsSignature[4]; // 0x05054b50
+    ushort dsDataLength;
+    if (dsDataLength > 0)
+        uchar dsData[dsDataLength];
+} ZIPDIGITALSIG;
+
+// Defintes the Data descriptor
+typedef struct
+{
+    char ddSignature[4]; // 0x08074b50
+    uint ddCRC<format = hex>;
+    uint ddCompressedSize;
+    uint ddUncompressedSize;
+} ZIPDATADESCR;
+
+// Defines the end of central directory locator
+typedef struct
+{
+    char elSignature[4]; // 0x06054b50
+    ushort elDiskNumber;
+    ushort elStartDiskNumber;
+    ushort elEntriesOnDisk;
+    ushort elEntriesInDirectory;
+    uint elDirectorySize;
+    uint elDirectoryOffset;
+    ushort elCommentLength;
+    if (elCommentLength > 0)
+        char elComment[elCommentLength];
+} ZIPENDLOCATOR;
+
+//--------------------------------------------
+
+// Custom read functions that allows the name of the
+//  of the file to appear in the Template Results.
+
+string ReadZIPFILERECORD(ZIPFILERECORD &file)
+{
+    if (exists(file.frFileName))
+        return file.frFileName;
+    else
+        return "";
+}
+
+string ReadZIPDIRENTRY(ZIPDIRENTRY &entry)
+{
+    if (exists(entry.deFileName))
+        return entry.deFileName;
+    else
+        return "";
+}
+
+// Custom write function that allows changing
+//  the name of the file - note that the file
+//  name size cannot be increased
+
+void WriteZIPFILERECORD(ZIPFILERECORD &file, string s)
+{
+    local int len = Strlen(s);
+    if (exists(file.frFileName))
+    {
+        Strncpy(file.frFileName, s, file.frFileNameLength);
+        if (len < file.frFileNameLength)
+            file.frFileName[len] = 0; // null terminate
+    }
+}
+
+//--------------------------------------------
+
+// Define the file
+LittleEndian(); 
+
+typedef enum { 
+    TYPE_ZIPFILERECORD, 
+    TYPE_ZIPDATADESCR, 
+    TYPE_ZIPDIRENTRY, 
+    TYPE_ZIPDIGITALSIG, 
+    TYPE_ZIPENDLOCATOR 
+} ENTRY_TYPE;
+
+typedef struct
+{
+    int64 pos;
+    ENTRY_TYPE type;
+} ENTRY_MATCH;
+
+local TFindResults r;
+local int i;
+local ENTRY_MATCH match[10240];
+local int match_len;
+
+void find(uint tag, ENTRY_TYPE type) {
+    r = FindAll( tag );
+    for( i = 0; i < r.count; i++ ) {
+        match[match_len].pos = r.start[i];
+        match[match_len].type = type;
+        match_len++;
+    }
+}
+
+find(0x04034b50, TYPE_ZIPFILERECORD);
+find(0x08074b50, TYPE_ZIPDATADESCR);
+find(0x02014b50, TYPE_ZIPDIRENTRY);
+find(0x05054b50, TYPE_ZIPDIGITALSIG);
+find(0x06054b50, TYPE_ZIPENDLOCATOR);
+
+local ENTRY_MATCH tempMatch;
+local int j;
+
+void swap(int i, int j) {
+    tempMatch.pos = match[i].pos;
+    tempMatch.type = match[i].type;
+    match[i].pos = match[j].pos;
+    match[i].type = match[j].type;
+    match[j].pos = tempMatch.pos;
+    match[j].type = tempMatch.type;
+}
+
+for( i = 0; i < match_len-1; i++ ) {
+    for( j = 0; j < match_len-i-1; j++ ) {
+        if (match[j].pos > match[j+1].pos) {
+            swap(j, j+1);
+        }
+    }
+}
+
+for( i = 0; i < match_len; i++ ) {
+    FSeek(match[i].pos);
+    switch (match[i].type) {
+        case TYPE_ZIPFILERECORD:
+            SetBackColor( cLtGray );
+            ZIPFILERECORD record;
+            break;
+        case TYPE_ZIPDATADESCR:
+            SetBackColor( cLtGreen );
+            ZIPDATADESCR dataDescr;
+            break;
+        case TYPE_ZIPDIRENTRY:
+            SetBackColor( cLtPurple );
+            ZIPDIRENTRY dirEntry;
+            break;
+        case TYPE_ZIPDIGITALSIG:
+            SetBackColor( cLtBlue );
+            ZIPDIGITALSIG digitalSig;
+            break;
+        case TYPE_ZIPENDLOCATOR:
+            SetBackColor( cLtYellow );
+            ZIPENDLOCATOR endLocator;
+            break;
+    }
+}
